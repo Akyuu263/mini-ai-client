@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use serde::Deserialize;
-use std::fmt::Display;
+use std::{fmt::Display, io::Write};
 
 // openai api
 #[derive(Debug, Deserialize)]
@@ -16,7 +16,8 @@ struct ChatCompletion {
 #[derive(Debug, Deserialize)]
 struct Choice {
     index: u32,
-    message: Msg,
+    message: Option<Msg>,
+    delta: Option<Delta>,
     finish_reason: Option<String>,
 }
 
@@ -24,6 +25,12 @@ struct Choice {
 struct Msg {
     role: String,
     content: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct Delta {
+    role: Option<String>,
+    content: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -39,6 +46,39 @@ impl Display for Usage {
     }
 }
 
+fn parse_stream(buff: &mut Vec<u8>, mut process: impl FnMut(ChatCompletion)) -> bool {
+    let mut done = false;
+    while let Some(pos) = buff.iter().position(|&b| b == b'\n') {
+        let line = buff.drain(..=pos).collect::<Vec<_>>();
+        let trimmed_line = line.trim_ascii();
+        if trimmed_line.is_empty() {
+            continue;
+        }
+        if trimmed_line[0] == b':' {
+            continue;
+        }
+        let Some(payload) = trimmed_line.strip_prefix(b"data:") else {
+            continue;
+        };
+
+        let payload = payload.trim_ascii();
+        if payload == b"[DONE]" {
+            done = true;
+            break;
+        }
+
+        let Ok(parse) = serde_json::from_slice::<ChatCompletion>(payload) else {
+            eprintln!("Parsing failed");
+            continue;
+        };
+
+        process(parse);
+    }
+
+    done
+
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let api_key = std::env::var("DEEPSEEK_API_KEY")
@@ -50,17 +90,38 @@ async fn main() -> Result<()> {
     let body = serde_json::json!({
         "model": "deepseek-chat",
         "messages":[
-            { "role": "user", "content": "一句话介绍你自己" }
-        ]
+            { "role": "user", "content": "写一篇2026全国卷高考满分语文作文" }
+        ],
+        "stream": true,
+        "stream_options": {"include_usage": true}
     });
 
-    let resp = client
+    let mut resp = client
         .post(format!("{base_url}/chat/completions"))
         .bearer_auth(&api_key)
         .json(&body)
         .send()
         .await?;
 
+    let mut buff: Vec<u8> = Vec::new();
+
+    while let Some(bytes) = resp.chunk().await? {
+        buff.extend_from_slice(&bytes);
+        let done = parse_stream(&mut buff, |event| {
+            if let Some(usage) = &event.usage {
+                println!("\n{usage}");
+                return;
+            }
+            let Some(choice) = event.choices.first() else { return; };
+            let Some(delta) = choice.delta.as_ref() else { return; };
+            let Some(content) = delta.content.as_deref() else { return; };
+            print!("{content}");
+            let _ = std::io::stdout().flush();
+        });
+        if done {break;}
+    }
+
+    /*
     let completion = resp.json::<ChatCompletion>().await?;
 
     match completion.choices.first() {
@@ -75,6 +136,7 @@ async fn main() -> Result<()> {
     if let Some(usage) = completion.usage {
         println!("{}", usage);
     }
+    */
 
     Ok(())
 }
