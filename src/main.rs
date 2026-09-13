@@ -1,6 +1,8 @@
 use anyhow::{Context, Result};
-use serde::Deserialize;
-use std::{fmt::Display, io::Write};
+use tokio::time::{timeout, Duration};
+use serde::{Deserialize, Serialize};
+use std::fmt::Display;
+use std::io::{self, Write};
 
 // openai api
 #[derive(Debug, Deserialize)]
@@ -16,13 +18,13 @@ struct ChatCompletion {
 #[derive(Debug, Deserialize)]
 struct Choice {
     index: u32,
-    message: Option<Msg>,
+    message: Option<Message>,
     delta: Option<Delta>,
     finish_reason: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
-struct Msg {
+#[derive(Debug, Clone, Deserialize, Serialize)]
+struct Message {
     role: String,
     content: String,
 }
@@ -86,57 +88,80 @@ async fn main() -> Result<()> {
     let base_url = std::env::var("AI_BASE_URL")
         .unwrap_or_else(|_| "https://api.deepseek.com".to_string());
     let client = reqwest::Client::new();
+    let mut history = Vec::<Message>::new();
+    
+    loop {
+        print!("> ");
+        io::stdout().flush()?;
 
-    let body = serde_json::json!({
-        "model": "deepseek-chat",
-        "messages":[
-            { "role": "user", "content": "写一篇2026全国卷高考满分语文作文" }
-        ],
-        "stream": true,
-        "stream_options": {"include_usage": true}
-    });
+        let mut line = String::new();
+        let n = io::stdin().read_line(&mut line)?;
+        if n == 0 {
+            break;
+        }
+        
+        let input = line.trim();
 
-    let mut resp = client
-        .post(format!("{base_url}/chat/completions"))
-        .bearer_auth(&api_key)
-        .json(&body)
-        .send()
-        .await?;
+        match input {
+            "exit" => break,
+            "" => continue,
+            _ => (),
+        }
 
-    let mut buff: Vec<u8> = Vec::new();
+        history.push(Message { role: "user".into(), content: input.to_string()});
 
-    while let Some(bytes) = resp.chunk().await? {
-        buff.extend_from_slice(&bytes);
-        let done = parse_stream(&mut buff, |event| {
-            if let Some(usage) = &event.usage {
-                println!("\n{usage}");
-                return;
-            }
-            let Some(choice) = event.choices.first() else { return; };
-            let Some(delta) = choice.delta.as_ref() else { return; };
-            let Some(content) = delta.content.as_deref() else { return; };
-            print!("{content}");
-            let _ = std::io::stdout().flush();
+        let body = serde_json::json!({
+            "model": "deepseek-chat",
+            "messages": &history,
+            "stream": true,
+            "stream_options": {"include_usage": true}
         });
-        if done {break;}
-    }
 
-    /*
-    let completion = resp.json::<ChatCompletion>().await?;
+        let mut resp = match
+            timeout(Duration::from_secs(30),
+            client
+            .post(format!("{base_url}/chat/completions"))
+            .bearer_auth(&api_key)
+            .json(&body)
+            .send())
+            .await {
+                Err(_elapsed) => {
+                    eprint!("Request timed out.Please check your network");
+                    continue;
+                }
+                Ok(Err(e)) => {
+                    return Err(e.into());
+                }
+                Ok(Ok(resp)) => {
+                    resp
+                }
+        };
 
-    match completion.choices.first() {
-        Some(choice) => {
-            println!("{}", choice.message.content);
+        let mut buff: Vec<u8> = Vec::new();
+        let mut reply = String::new();
+
+        while let Some(bytes) = timeout(Duration::from_secs(15), resp.chunk()).await?? {
+            buff.extend_from_slice(&bytes);
+            let done = parse_stream(&mut buff, |event| {
+                if let Some(usage) = &event.usage {
+                    println!("\n{usage}");
+                    return;
+                }
+                let Some(choice) = event.choices.first() else { return; };
+                let Some(delta) = choice.delta.as_ref() else { return; };
+                let Some(content) = delta.content.as_deref() else { return; };
+                print!("{content}");
+                let _ = io::stdout().flush();
+                reply.push_str(content);
+            });
+            if done {break;}
         }
-        None => {
-            println!("No return from the model.")
-        }
-    }
 
-    if let Some(usage) = completion.usage {
-        println!("{}", usage);
+        history.push(Message { role: "assistant".into(), content: reply });
+
+        println!();
+
     }
-    */
 
     Ok(())
 }
