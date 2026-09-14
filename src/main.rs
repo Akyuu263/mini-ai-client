@@ -1,5 +1,5 @@
-use anyhow::{Context, Result};
-use tokio::time::{timeout, Duration};
+use anyhow::{Context, Result, anyhow};
+use tokio::time::{timeout, Duration, sleep};
 use serde::{Deserialize, Serialize};
 use std::fmt::Display;
 use std::io::{self, Write};
@@ -81,6 +81,31 @@ fn parse_stream(buff: &mut Vec<u8>, mut process: impl FnMut(ChatCompletion)) -> 
 
 }
 
+async fn send_with_retry(client: &reqwest::Client, url: &str, key: &str, body: &serde_json::Value) -> Result<reqwest::Response> {
+    for attempt in 0..3 {
+        match client.post(url).bearer_auth(key).json(&body).send().await {
+            Ok(resp) if resp.status().is_success() => {
+                return Ok(resp);
+            }
+            Ok(resp) if resp.status().is_server_error() || resp.status().as_u16() == 429 => {
+                println!("Retrying: {}, error code: 429", attempt + 1);
+                sleep(Duration::from_secs(2u64.pow(attempt))).await;
+            }
+            Err(e) if e.is_timeout() || e.is_connect() => {
+                println!("Timed out, retrying: {}", attempt + 1);
+                sleep(Duration::from_secs(2u64.pow(attempt))).await;
+            }
+            Err(e) => {
+                return Err(e.into());
+            }
+            Ok(resp) => {
+                return Err(anyhow!("Connection refused (HTTP {})", resp.status()));
+            }
+        }
+    }
+    Err(anyhow!("Connection failed after 3 tries"))
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let api_key = std::env::var("DEEPSEEK_API_KEY")
@@ -117,44 +142,41 @@ async fn main() -> Result<()> {
             "stream_options": {"include_usage": true}
         });
 
-        let mut resp = match
-            timeout(Duration::from_secs(30),
-            client
-            .post(format!("{base_url}/chat/completions"))
-            .bearer_auth(&api_key)
-            .json(&body)
-            .send())
-            .await {
-                Err(_elapsed) => {
-                    eprint!("Request timed out.Please check your network");
-                    continue;
-                }
-                Ok(Err(e)) => {
-                    return Err(e.into());
-                }
-                Ok(Ok(resp)) => {
-                    resp
-                }
-        };
+        let url = format!("{base_url}/chat/completions");
+        let mut resp = send_with_retry(&client, &url, &api_key, &body).await?;
 
         let mut buff: Vec<u8> = Vec::new();
         let mut reply = String::new();
 
-        while let Some(bytes) = timeout(Duration::from_secs(15), resp.chunk()).await?? {
-            buff.extend_from_slice(&bytes);
-            let done = parse_stream(&mut buff, |event| {
-                if let Some(usage) = &event.usage {
-                    println!("\n{usage}");
-                    return;
+        loop {
+            match timeout(Duration::from_secs(15), resp.chunk()).await {
+                Err(_elapsed) => {
+                    println!("Waiting for next token timed out");
+                    break;
                 }
-                let Some(choice) = event.choices.first() else { return; };
-                let Some(delta) = choice.delta.as_ref() else { return; };
-                let Some(content) = delta.content.as_deref() else { return; };
-                print!("{content}");
-                let _ = io::stdout().flush();
-                reply.push_str(content);
-            });
-            if done {break;}
+                Ok(Err(e)) => {
+                    return Err(e.into());
+                }
+                Ok(Ok(None)) => {
+                    break;
+                }
+                Ok(Ok(Some(bytes))) => {
+                    buff.extend_from_slice(&bytes);
+                    let done = parse_stream(&mut buff, |event| {
+                        if let Some(usage) = &event.usage {
+                            println!("\n{usage}");
+                            return;
+                        }
+                        let Some(choice) = event.choices.first() else { return; };
+                        let Some(delta) = choice.delta.as_ref() else { return; };
+                        let Some(content) = delta.content.as_deref() else { return; };
+                        print!("{content}");
+                        let _ = io::stdout().flush();
+                        reply.push_str(content);
+                    });
+                    if done {break;}
+                }
+            }
         }
 
         history.push(Message { role: "assistant".into(), content: reply });
