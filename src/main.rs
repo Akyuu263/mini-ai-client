@@ -83,23 +83,23 @@ fn parse_stream(buff: &mut Vec<u8>, mut process: impl FnMut(ChatCompletion)) -> 
 
 async fn send_with_retry(client: &reqwest::Client, url: &str, key: &str, body: &serde_json::Value) -> Result<reqwest::Response> {
     for attempt in 0..3 {
-        match client.post(url).bearer_auth(key).json(&body).send().await {
+        match client.post(url).bearer_auth(key).json(body).send().await {
             Ok(resp) if resp.status().is_success() => {
                 return Ok(resp);
             }
             Ok(resp) if resp.status().is_server_error() || resp.status().as_u16() == 429 => {
-                println!("Retrying: {}, error code: 429", attempt + 1);
+                eprintln!("Retrying: {}, error code: {}", attempt + 1, resp.status());
                 sleep(Duration::from_secs(2u64.pow(attempt))).await;
             }
             Err(e) if e.is_timeout() || e.is_connect() => {
-                println!("Timed out, retrying: {}", attempt + 1);
+                eprintln!("Connection error, retrying: {}", attempt + 1);
                 sleep(Duration::from_secs(2u64.pow(attempt))).await;
             }
             Err(e) => {
                 return Err(e.into());
             }
             Ok(resp) => {
-                return Err(anyhow!("Connection refused (HTTP {})", resp.status()));
+                return Err(anyhow!("Request refused (HTTP {})", resp.status()));
             }
         }
     }
@@ -148,16 +148,21 @@ async fn main() -> Result<()> {
         let mut buff: Vec<u8> = Vec::new();
         let mut reply = String::new();
 
+        let mut completed: bool = false;
         loop {
             match timeout(Duration::from_secs(15), resp.chunk()).await {
                 Err(_elapsed) => {
-                    println!("Waiting for next token timed out");
+                    eprintln!("Waiting for next token timed out");
+                    history.pop();
                     break;
                 }
                 Ok(Err(e)) => {
-                    return Err(e.into());
+                    eprintln!("{e}");
+                    history.pop();
+                    break;
                 }
                 Ok(Ok(None)) => {
+                    completed = true;
                     break;
                 }
                 Ok(Ok(Some(bytes))) => {
@@ -174,12 +179,17 @@ async fn main() -> Result<()> {
                         let _ = io::stdout().flush();
                         reply.push_str(content);
                     });
-                    if done {break;}
+                    if done {
+                        completed = true;
+                        break;
+                    }
                 }
             }
         }
 
-        history.push(Message { role: "assistant".into(), content: reply });
+        if completed {
+            history.push(Message { role: "assistant".into(), content: reply });
+        }
 
         println!();
 
