@@ -150,40 +150,52 @@ async fn main() -> Result<()> {
 
         let mut completed: bool = false;
         loop {
-            match timeout(Duration::from_secs(15), resp.chunk()).await {
-                Err(_elapsed) => {
-                    eprintln!("Waiting for next token timed out");
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => {
+                    println!("Interpreted");
                     history.pop();
                     break;
                 }
-                Ok(Err(e)) => {
-                    eprintln!("{e}");
-                    history.pop();
-                    break;
-                }
-                Ok(Ok(None)) => {
-                    completed = true;
-                    break;
-                }
-                Ok(Ok(Some(bytes))) => {
-                    buff.extend_from_slice(&bytes);
-                    let done = parse_stream(&mut buff, |event| {
-                        if let Some(usage) = &event.usage {
-                            println!("\n{usage}");
-                            return;
+
+                result = timeout(Duration::from_secs(15), resp.chunk()) => {
+                    match result {
+                        Err(_elapsed) => {
+                            eprintln!("Waiting for next token timed out");
+                            history.pop();
+                            break;
                         }
-                        let Some(choice) = event.choices.first() else { return; };
-                        let Some(delta) = choice.delta.as_ref() else { return; };
-                        let Some(content) = delta.content.as_deref() else { return; };
-                        print!("{content}");
-                        let _ = io::stdout().flush();
-                        reply.push_str(content);
-                    });
-                    if done {
-                        completed = true;
-                        break;
+                        Ok(Err(e)) => {
+                            eprintln!("{e}");
+                            history.pop();
+                            break;
+                        }
+                        Ok(Ok(None)) => {
+                            completed = true;
+                            break;
+                        }
+                        Ok(Ok(Some(bytes))) => {
+                            buff.extend_from_slice(&bytes);
+                            let done = parse_stream(&mut buff, |event| {
+                                if let Some(usage) = &event.usage {
+                                    println!("\n{usage}");
+                                    return;
+                                }
+                                let Some(choice) = event.choices.first() else { return; };
+                                let Some(delta) = choice.delta.as_ref() else { return; };
+                                let Some(content) = delta.content.as_deref() else { return; };
+                                print!("{content}");
+                                let _ = io::stdout().flush();
+                                reply.push_str(content);
+                            });
+                            if done {
+                                completed = true;
+                                break;
+                            }
+                        }
+
                     }
                 }
+
             }
         }
 
