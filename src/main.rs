@@ -4,6 +4,9 @@ use serde::{Deserialize, Serialize};
 use std::fmt::Display;
 use std::io::{self, Write};
 
+const MAX_ROUNDS: usize = 5;
+const MAX_MSG: usize = MAX_ROUNDS * 2;
+
 // openai api
 #[derive(Debug, Deserialize)]
 struct ChatCompletion {
@@ -201,6 +204,9 @@ async fn main() -> Result<()> {
 
         if completed {
             history.push(Message { role: "assistant".into(), content: reply });
+            if history.len() > MAX_MSG {
+                history.drain(0..history.len() - MAX_MSG);
+            }
         }
 
         println!();
