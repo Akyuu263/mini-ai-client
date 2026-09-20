@@ -1,114 +1,12 @@
-use anyhow::{Context, Result, anyhow};
-use tokio::time::{timeout, Duration, sleep};
-use serde::{Deserialize, Serialize};
-use std::fmt::Display;
 use std::io::{self, Write};
+use tokio::time::{Duration, timeout};
+use anyhow::{Context, Result};
+use mini_ai_client::{Message, parse_stream, send_with_retry};
 
 const MAX_ROUNDS: usize = 5;
 const MAX_MSG: usize = MAX_ROUNDS * 2;
 
 // openai api
-#[derive(Debug, Deserialize)]
-struct ChatCompletion {
-    id: String,
-    object: String,
-    created: u32,
-    model: String,
-    choices: Vec<Choice>,
-    usage: Option<Usage>,
-}
-
-#[derive(Debug, Deserialize)]
-struct Choice {
-    index: u32,
-    message: Option<Message>,
-    delta: Option<Delta>,
-    finish_reason: Option<String>,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-struct Message {
-    role: String,
-    content: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct Delta {
-    role: Option<String>,
-    content: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct Usage {
-    prompt_tokens: u32,
-    completion_tokens: u32,
-    total_tokens: u32,
-}
-
-impl Display for Usage {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "prompt: {}, completion: {}, total: {}", self.prompt_tokens, self.completion_tokens, self.total_tokens)
-    }
-}
-
-fn parse_stream(buff: &mut Vec<u8>, mut process: impl FnMut(ChatCompletion)) -> bool {
-    let mut done = false;
-    while let Some(pos) = buff.iter().position(|&b| b == b'\n') {
-        let line = buff.drain(..=pos).collect::<Vec<_>>();
-        let trimmed_line = line.trim_ascii();
-        if trimmed_line.is_empty() {
-            continue;
-        }
-        if trimmed_line[0] == b':' {
-            continue;
-        }
-        let Some(payload) = trimmed_line.strip_prefix(b"data:") else {
-            continue;
-        };
-
-        let payload = payload.trim_ascii();
-        if payload == b"[DONE]" {
-            done = true;
-            break;
-        }
-
-        let Ok(parse) = serde_json::from_slice::<ChatCompletion>(payload) else {
-            eprintln!("Parsing failed");
-            continue;
-        };
-
-        process(parse);
-    }
-
-    done
-
-}
-
-async fn send_with_retry(client: &reqwest::Client, url: &str, key: &str, body: &serde_json::Value) -> Result<reqwest::Response> {
-    for attempt in 0..3 {
-        match client.post(url).bearer_auth(key).json(body).send().await {
-            Ok(resp) if resp.status().is_success() => {
-                return Ok(resp);
-            }
-            Ok(resp) if resp.status().is_server_error() || resp.status().as_u16() == 429 => {
-                eprintln!("Retrying: {}, error code: {}", attempt + 1, resp.status());
-                sleep(Duration::from_secs(2u64.pow(attempt))).await;
-            }
-            Err(e) if e.is_timeout() || e.is_connect() => {
-                eprintln!("Connection error, retrying: {}", attempt + 1);
-                sleep(Duration::from_secs(2u64.pow(attempt))).await;
-            }
-            Err(e) => {
-                return Err(e.into());
-            }
-            Ok(resp) => {
-                return Err(anyhow!("Request refused (HTTP {})", resp.status()));
-            }
-        }
-    }
-    Err(anyhow!("Connection failed after 3 tries"))
-}
-
 #[tokio::main]
 async fn main() -> Result<()> {
     let api_key = std::env::var("DEEPSEEK_API_KEY")
