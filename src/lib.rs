@@ -104,3 +104,86 @@ pub async fn send_with_retry(client: &reqwest::Client, url: &str, key: &str, bod
     Err(anyhow!("Connection failed after 3 tries"))
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn handles_a_split_line() {
+        let mut buff = Vec::new();
+        let mut received = Vec::new();
+
+        buff.extend_from_slice(
+            br#"data: {"id":"1","object":"chat.completion.chunk","created":0,"model":"test","choices":[{"index":0,"delta":{"content":"hi"#
+            );
+        let done = parse_stream(&mut buff, |c| received.push(c));
+        assert!(!done);
+        assert_eq!(received.len(), 0);
+
+        buff.extend_from_slice(b"\"}}]}\n\n");
+        let done = parse_stream(&mut buff, |c| received.push(c));
+        assert!(!done);
+        assert_eq!(received.len(), 1);
+
+        let content = received[0].choices[0]
+            .delta.as_ref().unwrap()
+            .content.as_deref().unwrap();
+        assert_eq!(content, "hi");
+    }
+
+    #[test]
+    fn handles_a_merged_line() {
+        let mut buff = Vec::new();
+        let mut received = Vec::new();
+        buff.extend_from_slice(
+            br#"data: {"id":"1","object":"chat.completion.chunk","created":0,"model":"test","choices":[{"index":0,"delta":{"content":"hi"}}]}
+
+            data: {"id":"1","object":"chat.completion.chu"#);
+        let done = parse_stream(&mut buff, |c| received.push(c));
+        assert!(!done);
+        assert_eq!(received.len(), 1);
+
+        buff.extend_from_slice(
+            br#"nk","created":0,"model":"test","choices":[{"index":0,"delta":{"content":"hi"}}]}
+
+            "#);
+        let done = parse_stream(&mut buff, |c| received.push(c));
+        assert!(!done);
+        assert_eq!(received.len(), 2);
+
+        let content = received[0].choices[0]
+            .delta.as_ref().unwrap()
+            .content.as_deref().unwrap();
+        assert_eq!(content, "hi");
+
+        let content = received[1].choices[0]
+            .delta.as_ref().unwrap()
+            .content.as_deref().unwrap();
+        assert_eq!(content, "hi");
+    }
+
+    #[test]
+    fn handles_heartbeat() {
+        let mut received = Vec::new();
+
+        buff.extend_from_slice(
+            br#"data: {"id":"1","object":"chat.completion.chunk","created":0,"model":"test","choices":[{"index":0,"delta":{"content":"hi"#
+            );
+        let done = parse_stream(&mut buff, |c| received.push(c));
+        assert!(!done);
+        assert_eq!(received.len(), 0);
+
+        buff.extend_from_slice(b"\"}}]}\n\n");
+        let done = parse_stream(&mut buff, |c| received.push(c));
+        assert!(!done);
+        assert_eq!(received.len(), 1);
+
+        let content = received[0].choices[0]
+            .delta.as_ref().unwrap()
+            .content.as_deref().unwrap();
+        assert_eq!(content, "hi");
+    }
+
+
+    }
+}
