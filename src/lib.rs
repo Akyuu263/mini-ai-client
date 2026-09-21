@@ -165,15 +165,15 @@ mod tests {
     #[test]
     fn handles_heartbeat() {
         let mut received = Vec::new();
+        let mut buff = Vec::new();
 
         buff.extend_from_slice(
-            br#"data: {"id":"1","object":"chat.completion.chunk","created":0,"model":"test","choices":[{"index":0,"delta":{"content":"hi"#
-            );
-        let done = parse_stream(&mut buff, |c| received.push(c));
-        assert!(!done);
-        assert_eq!(received.len(), 0);
+            br#": heartbeat
 
-        buff.extend_from_slice(b"\"}}]}\n\n");
+            data: {"id":"1","object":"chat.completion.chunk","created":0,"model":"test","choices":[{"index":0,"delta":{"content":"hi"}}]}
+
+            "#
+            );
         let done = parse_stream(&mut buff, |c| received.push(c));
         assert!(!done);
         assert_eq!(received.len(), 1);
@@ -184,6 +184,25 @@ mod tests {
         assert_eq!(content, "hi");
     }
 
+    #[test]
+    fn handles_done() {
+        let mut received = Vec::new();
+        let mut buff = Vec::new();
 
+        buff.extend_from_slice(
+            br#"data: {"id":"1","object":"chat.completion.chunk","created":0,"model":"test","choices":[{"index":0,"delta":{"content":"hi"}}]}
+
+            data: [DONE]
+
+            "#
+        );
+        let done = parse_stream(&mut buff, |c| received.push(c));
+        assert!(done);
+        assert_eq!(received.len(), 1);
+
+        let content = received[0].choices[0]
+            .delta.as_ref().unwrap()
+            .content.as_deref().unwrap();
+        assert_eq!(content, "hi");
     }
 }
