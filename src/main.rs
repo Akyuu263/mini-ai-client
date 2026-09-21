@@ -2,17 +2,30 @@ use std::io::{self, Write};
 use tokio::time::{Duration, timeout};
 use anyhow::{Context, Result};
 use mini_ai_client::{Message, parse_stream, send_with_retry};
+use clap::Parser;
 
-const MAX_ROUNDS: usize = 5;
-const MAX_MSG: usize = MAX_ROUNDS * 2;
+#[derive(Parser)]
+#[command(name = "mini-ai-client")]
+struct Args {
+    #[arg(short)]
+    model: String,
 
+    #[arg(long, default_value = "https://api.deepseek.com")]
+    base_url: String,
+
+    #[arg(long, default_value_t = 5)]
+    max_rounds: usize,
+
+    #[arg(long, default_value_t = 15)]
+    timeout_secs: u64,
+}
 // openai api
 #[tokio::main]
 async fn main() -> Result<()> {
+    let args = Args::parse();
+
     let api_key = std::env::var("DEEPSEEK_API_KEY")
         .context("Please set envrionmental variable DEEPSEEK_API_KEY")?;
-    let base_url = std::env::var("AI_BASE_URL")
-        .unwrap_or_else(|_| "https://api.deepseek.com".to_string());
     let client = reqwest::Client::new();
     let mut history = Vec::<Message>::new();
     
@@ -37,13 +50,13 @@ async fn main() -> Result<()> {
         history.push(Message { role: "user".into(), content: input.to_string()});
 
         let body = serde_json::json!({
-            "model": "deepseek-chat",
+            "model": args.model,
             "messages": &history,
             "stream": true,
             "stream_options": {"include_usage": true}
         });
 
-        let url = format!("{base_url}/chat/completions");
+        let url = format!("{}/chat/completions", args.base_url);
         let mut resp = send_with_retry(&client, &url, &api_key, &body).await?;
 
         let mut buff: Vec<u8> = Vec::new();
@@ -58,7 +71,7 @@ async fn main() -> Result<()> {
                     break;
                 }
 
-                result = timeout(Duration::from_secs(15), resp.chunk()) => {
+                result = timeout(Duration::from_secs(args.timeout_secs), resp.chunk()) => {
                     match result {
                         Err(_elapsed) => {
                             eprintln!("Waiting for next token timed out");
@@ -100,10 +113,11 @@ async fn main() -> Result<()> {
             }
         }
 
+        let max_msg = args.max_rounds * 2;
         if completed {
             history.push(Message { role: "assistant".into(), content: reply });
-            if history.len() > MAX_MSG {
-                history.drain(0..history.len() - MAX_MSG);
+            if history.len() > max_msg {
+                history.drain(0..history.len() - max_msg);
             }
         }
 
