@@ -1,13 +1,13 @@
 use std::io::{self, Write};
 use tokio::time::{Duration, timeout};
 use anyhow::{Context, Result};
-use mini_ai_client::{Message, parse_stream, send_with_retry};
+use mini_ai_client::{Message, parse_stream, run_batch, send_with_retry};
 use clap::Parser;
 
 #[derive(Parser)]
 #[command(name = "mini-ai-client")]
 struct Args {
-    #[arg(short)]
+    #[arg(short, long, default_value = "deepseek-chat")]
     model: String,
 
     #[arg(long, default_value = "https://api.deepseek.com")]
@@ -28,6 +28,7 @@ async fn main() -> Result<()> {
         .context("Please set envrionmental variable DEEPSEEK_API_KEY")?;
     let client = reqwest::Client::new();
     let mut history = Vec::<Message>::new();
+    let max_msg = args.max_rounds * 2;
     
     loop {
         print!("> ");
@@ -47,6 +48,16 @@ async fn main() -> Result<()> {
             _ => (),
         }
 
+        let url = format!("{}/chat/completions", args.base_url);
+
+        if input.contains('|') {
+            let questions: Vec<String> = input.split('|').map(|s| s.trim().to_string()).collect();
+
+            run_batch(&client, &url, &api_key, &args.model, questions).await?;
+
+            continue;
+        }
+
         history.push(Message { role: "user".into(), content: input.to_string()});
 
         let body = serde_json::json!({
@@ -56,7 +67,6 @@ async fn main() -> Result<()> {
             "stream_options": {"include_usage": true}
         });
 
-        let url = format!("{}/chat/completions", args.base_url);
         let mut resp = send_with_retry(&client, &url, &api_key, &body).await?;
 
         let mut buff: Vec<u8> = Vec::new();
@@ -66,7 +76,7 @@ async fn main() -> Result<()> {
         loop {
             tokio::select! {
                 _ = tokio::signal::ctrl_c() => {
-                    println!("Interpreted");
+                    println!("Interrupted");
                     history.pop();
                     break;
                 }
@@ -113,7 +123,6 @@ async fn main() -> Result<()> {
             }
         }
 
-        let max_msg = args.max_rounds * 2;
         if completed {
             history.push(Message { role: "assistant".into(), content: reply });
             if history.len() > max_msg {
