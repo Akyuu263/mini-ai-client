@@ -53,7 +53,16 @@ async fn main() -> Result<()> {
         if input.contains('|') {
             let questions: Vec<String> = input.split('|').map(|s| s.trim().to_string()).collect();
 
-            run_batch(&client, &url, &api_key, &args.model, questions).await?;
+            run_batch(&client, &url, &api_key, &args.model, questions, |item| {
+                match item.result {
+                    Ok(res) => {
+                        println!("[{}]. {}", item.index + 1, res);
+                    },
+                    Err(e) => {
+                        eprintln!("{e}");
+                    }
+                }
+            }).await?;
 
             continue;
         }

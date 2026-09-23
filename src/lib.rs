@@ -40,6 +40,12 @@ pub struct Usage {
     total_tokens: u32,
 }
 
+pub struct BatchItem {
+    pub index: usize,
+    pub question: String,
+    pub result: anyhow::Result<String>,
+}
+
 impl Display for Usage {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "prompt: {}, completion: {}, total: {}", self.prompt_tokens, self.completion_tokens, self.total_tokens)
@@ -79,7 +85,12 @@ pub fn parse_stream(buff: &mut Vec<u8>, mut process: impl FnMut(ChatCompletion))
 
 }
 
-pub async fn send_with_retry(client: &reqwest::Client, url: &str, key: &str, body: &serde_json::Value) -> Result<reqwest::Response> {
+pub async fn send_with_retry(
+    client: &reqwest::Client,
+    url: &str,
+    key: &str, 
+    body: &serde_json::Value
+) -> Result<reqwest::Response> {
     for attempt in 0..3 {
         match client.post(url).bearer_auth(key).json(body).send().await {
             Ok(resp) if resp.status().is_success() => {
@@ -104,7 +115,30 @@ pub async fn send_with_retry(client: &reqwest::Client, url: &str, key: &str, bod
     Err(anyhow!("Connection failed after 3 tries"))
 }
 
-pub async fn run_batch(client: &reqwest::Client, url: &str, key: &str, model: &str, questions: Vec<String>) -> Result<()> {
+async fn fetch_result(
+    client: &reqwest::Client,
+    url: &str,
+    key: &str, 
+    body: &serde_json::Value
+) -> Result<String> {
+    let resp = send_with_retry(&client, &url, &key, &body).await?;
+    let completion: ChatCompletion = resp.json().await?;
+    let answer = completion.choices
+        .first()
+        .and_then(|c| c.message.as_ref())
+        .map(|m| m.content.clone())
+        .unwrap_or_else(|| "(No response)".into());
+    Ok(answer)
+}
+
+pub async fn run_batch(
+    client: &reqwest::Client,
+    url: &str,
+    key: &str,
+    model: &str,
+    questions: Vec<String>,
+    mut on_result: impl FnMut(BatchItem),
+) -> Result<()> {
     let sem = Arc::new(Semaphore::new(3));
     let mut set = JoinSet::new();
 
@@ -116,26 +150,36 @@ pub async fn run_batch(client: &reqwest::Client, url: &str, key: &str, model: &s
         let sem = sem.clone();
 
         set.spawn(async move {
-            let _permit = sem.acquire().await?;
             let body = serde_json::json!({
                 "model": model,
                 "messages": [{"role": "user", "content":q}],
             });
-            let resp = send_with_retry(&client, &url, &key, &body).await?;
-            let completion: ChatCompletion = resp.json().await?;
-            let answer = completion.choices
-                .first()
-                .and_then(|c| c.message.as_ref())
-                .map(|m| m.content.clone())
-                .unwrap_or_else(|| "(No response)".into());
-            Ok::<_, anyhow::Error>((i, answer))
+
+            let result: Result<String> = async {
+                let _permit = sem.acquire().await?;
+                fetch_result(&client, &url, &key, &body).await
+            }.await;
+
+            BatchItem {
+                index: i,
+                question: q,
+                result,
+            }
         });
     }
 
-    while let Some(res) = set.join_next().await {
-        let (i, answer) = res??;
-        println!("[{}] {}", i + 1, answer);
+    while let Some(joined) = set.join_next().await {
+        match joined {
+            Ok(item) => on_result(item),
+            Err(e) if e.is_cancelled() => {
+                eprintln!("The batch task was cancelled: {e}");
+            },
+            Err(e) => {
+                eprintln!("The batch task panicked or failed: {e}");
+            }
+        }
     }
+
     Ok(())
 }
 
@@ -168,7 +212,7 @@ mod tests {
 
     #[test]
     fn handles_a_merged_line() {
-        let mut buff = Vec::new();
+ let mut buff = Vec::new();
         let mut received = Vec::new();
         buff.extend_from_slice(
             br#"data: {"id":"1","object":"chat.completion.chunk","created":0,"model":"test","choices":[{"index":0,"delta":{"content":"hi"}}]}
