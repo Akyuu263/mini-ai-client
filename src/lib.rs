@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use tokio::{sync::Semaphore, task::JoinSet, time::{Duration, sleep}};
 use anyhow::{Result, anyhow};
+use tracing::{error, warn};
 use std::{fmt::Display, sync::Arc};
 
 #[derive(Debug, Deserialize)]
@@ -74,7 +75,7 @@ pub fn parse_stream(buff: &mut Vec<u8>, mut process: impl FnMut(ChatCompletion))
         }
 
         let Ok(parse) = serde_json::from_slice::<ChatCompletion>(payload) else {
-            eprintln!("Parsing failed");
+            warn!("Parsing failed");
             continue;
         };
 
@@ -97,21 +98,24 @@ pub async fn send_with_retry(
                 return Ok(resp);
             }
             Ok(resp) if resp.status().is_server_error() || resp.status().as_u16() == 429 => {
-                eprintln!("Retrying: {}, error code: {}", attempt + 1, resp.status());
+                warn!(attempt = attempt + 1, status = %resp.status(), "retrying");
                 sleep(Duration::from_secs(2u64.pow(attempt))).await;
             }
             Err(e) if e.is_timeout() || e.is_connect() => {
-                eprintln!("Connection error, retrying: {}", attempt + 1);
+                warn!(attempt = attempt + 1, "connection error, retrying");
                 sleep(Duration::from_secs(2u64.pow(attempt))).await;
             }
             Err(e) => {
+                error!(error = %e, "request refused");
                 return Err(e.into());
             }
             Ok(resp) => {
+                error!(status = %resp.status(), "request refused");
                 return Err(anyhow!("Request refused (HTTP {})", resp.status()));
             }
         }
     }
+    error!(attempts = 3, "connection failed after 3 tries");
     Err(anyhow!("Connection failed after 3 tries"))
 }
 
@@ -121,7 +125,7 @@ async fn fetch_result(
     key: &str, 
     body: &serde_json::Value
 ) -> Result<String> {
-    let resp = send_with_retry(&client, &url, &key, &body).await?;
+    let resp = send_with_retry(client, url, key, body).await?;
     let completion: ChatCompletion = resp.json().await?;
     let answer = completion.choices
         .first()
@@ -172,10 +176,10 @@ pub async fn run_batch(
         match joined {
             Ok(item) => on_result(item),
             Err(e) if e.is_cancelled() => {
-                eprintln!("The batch task was cancelled: {e}");
+                warn!(error = %e, "The batch task was cancelled");
             },
             Err(e) => {
-                eprintln!("The batch task panicked or failed: {e}");
+                warn!(error = %e, "The batch task panicked or failed");
             }
         }
     }
@@ -212,7 +216,7 @@ mod tests {
 
     #[test]
     fn handles_a_merged_line() {
- let mut buff = Vec::new();
+        let mut buff = Vec::new();
         let mut received = Vec::new();
         buff.extend_from_slice(
             br#"data: {"id":"1","object":"chat.completion.chunk","created":0,"model":"test","choices":[{"index":0,"delta":{"content":"hi"}}]}

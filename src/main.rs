@@ -3,6 +3,8 @@ use tokio::time::{Duration, timeout};
 use anyhow::{Context, Result};
 use mini_ai_client::{Message, parse_stream, run_batch, send_with_retry};
 use clap::Parser;
+use tracing_subscriber::EnvFilter;
+use tracing::warn;
 
 #[derive(Parser)]
 #[command(name = "mini-ai-client")]
@@ -19,9 +21,14 @@ struct Args {
     #[arg(long, default_value_t = 15)]
     timeout_secs: u64,
 }
+
 // openai api
 #[tokio::main]
 async fn main() -> Result<()> {
+    tracing_subscriber::fmt()
+        .with_env_filter(EnvFilter::from_default_env())
+        .init();
+
     let args = Args::parse();
 
     let api_key = std::env::var("DEEPSEEK_API_KEY")
@@ -59,7 +66,7 @@ async fn main() -> Result<()> {
                         println!("[{}]. {}", item.index + 1, res);
                     },
                     Err(e) => {
-                        eprintln!("{e}");
+                        warn!(error = %e, "batch task failed");
                     }
                 }
             }).await?;
@@ -93,12 +100,12 @@ async fn main() -> Result<()> {
                 result = timeout(Duration::from_secs(args.timeout_secs), resp.chunk()) => {
                     match result {
                         Err(_elapsed) => {
-                            eprintln!("Waiting for next token timed out");
+                            warn!("Waiting for next token timed out");
                             history.pop();
                             break;
                         }
                         Ok(Err(e)) => {
-                            eprintln!("{e}");
+                            warn!(error = %e, "stream interrupted");
                             history.pop();
                             break;
                         }
