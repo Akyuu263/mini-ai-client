@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use tokio::{sync::Semaphore, task::JoinSet, time::{Duration, sleep}};
 use anyhow::{Result, anyhow};
-use tracing::{error, warn};
+use tracing::{error, info, info_span, instrument, warn};
 use std::{fmt::Display, sync::Arc};
 
 #[derive(Debug, Deserialize)]
@@ -86,6 +86,7 @@ pub fn parse_stream(buff: &mut Vec<u8>, mut process: impl FnMut(ChatCompletion))
 
 }
 
+#[instrument(skip_all)]
 pub async fn send_with_retry(
     client: &reqwest::Client,
     url: &str,
@@ -154,6 +155,11 @@ pub async fn run_batch(
         let sem = sem.clone();
 
         set.spawn(async move {
+            let span = info_span!("batch_task", index = i);
+            let _enter = span.enter();
+
+            info!(question = %q, "task started");
+
             let body = serde_json::json!({
                 "model": model,
                 "messages": [{"role": "user", "content":q}],
