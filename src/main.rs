@@ -89,6 +89,7 @@ async fn main() -> Result<()> {
         let mut reply = String::new();
 
         let mut completed: bool = false;
+
         loop {
             tokio::select! {
                 _ = tokio::signal::ctrl_c() => {
